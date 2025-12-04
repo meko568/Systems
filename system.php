@@ -410,26 +410,48 @@ try {
             // CRITICAL: Start buffering early to catch any potential errors
             ob_start();
 
-            // --- 1. Setup Variables and Spreadsheet ---
+            // --- 1. Setup Variables and Word Document ---
             $month = $_POST["month"];
             $year = date("Y");
             $monthName = DateTime::createFromFormat('!m', $month)->format('F');
 
-            // Define the full path for the file save
+            // Define the full path for the file save - SAVES TO D:\reports\
             $saveDir = "D:/reports/";
-            $fileName = "All_Students_{$monthName}_report.xlsx";
+            $fileName = "All_Students_{$monthName}_report.docx";
             $savePath = $saveDir . $fileName;
 
-            // Use PhpSpreadsheet for Excel
-            $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
-            $sheet = $spreadsheet->getActiveSheet();
-            $sheet->setTitle('Summary');
+            // Create new Word document using PhpWord
+            $phpWord = new \PhpOffice\PhpWord\PhpWord();
 
-            $rowNum = 1; // Starting row for data insertion
+            // Set document properties
+            $properties = $phpWord->getDocInfo();
+            $properties->setCreator('Student Management System');
+            $properties->setTitle("Monthly Report - {$monthName} {$year}");
 
-            // NOTE: $IDs and $table are assumed to be defined earlier in your script.
+            // Define styles
+            $phpWord->addFontStyle('titleStyle', array('bold' => true, 'size' => 16, 'color' => '1F4788'));
+            $phpWord->addFontStyle('headerStyle', array('bold' => true, 'size' => 14, 'color' => '2E75B5'));
+            $phpWord->addFontStyle('subHeaderStyle', array('bold' => true, 'size' => 12));
+            $phpWord->addFontStyle('boldText', array('bold' => true, 'size' => 11));
+            $phpWord->addFontStyle('normalText', array('size' => 11));
+            $phpWord->addFontStyle('summaryStyle', array('bold' => true, 'size' => 12, 'color' => '0070C0'));
+
+            // Table style
+            $tableStyle = array(
+                'borderSize' => 6,
+                'borderColor' => '999999',
+                'cellMargin' => 80,
+                'alignment' => \PhpOffice\PhpWord\SimpleType\JcTable::CENTER
+            );
+            $phpWord->addTableStyle('studentTable', $tableStyle);
+
+            // Cell styles
+            $headerCellStyle = array('bgColor' => 'D9E2F3', 'valign' => 'center');
+            $cellStyle = array('valign' => 'center');
 
             // --- 2. Loop through all students to aggregate content ---
+            $hasData = false;
+
             foreach ($IDs as $ID) {
                 // Fetch lessons for the month
                 $sql = "SELECT * FROM {$ID}_{$table} WHERE MONTH(attend_date) = :month AND YEAR(attend_date) = :year";
@@ -442,6 +464,8 @@ try {
                     continue;
                 }
 
+                $hasData = true;
+
                 // Fetch student name
                 $sql = "SELECT student_name FROM `$table` WHERE student_id = :id";
                 $stmt = $db->prepare($sql);
@@ -449,48 +473,63 @@ try {
                 $name = $stmt->fetchColumn() ?: 'Unknown';
                 $nameSafe = cleanWordText($name);
 
-                // --- Insert Content into Spreadsheet (Display Data) ---
-                $sheet->setCellValue('A' . $rowNum, "P/I: Report for $monthName, $year");
-                $sheet->getStyle('A' . $rowNum)->getFont()->setBold(true)->setSize(14);
-                $rowNum++;
-                $sheet->setCellValue('A' . $rowNum, "Student: $nameSafe (ID: $ID)");
-                $rowNum += 2;
+                // Create a new section for each student
+                $section = $phpWord->addSection();
 
-                // Headers
-                $sheet->setCellValue('A' . $rowNum, "Lesson #")->getStyle('A' . $rowNum)->getFont()->setBold(true);
-                $sheet->setCellValue('B' . $rowNum, "Quiz Score")->getStyle('B' . $rowNum)->getFont()->setBold(true);
-                $sheet->setCellValue('C' . $rowNum, "Attendance")->getStyle('C' . $rowNum)->getFont()->setBold(true);
-                $sheet->setCellValue('D' . $rowNum, "Homework")->getStyle('D' . $rowNum)->getFont()->setBold(true);
-                $rowNum++;
+                // --- Insert Content into Word Document ---
+                // Title
+                $section->addText(
+                    "P/I: Report for {$monthName}, {$year}",
+                    'titleStyle',
+                    array('alignment' => \PhpOffice\PhpWord\SimpleType\Jc::CENTER)
+                );
+                $section->addTextBreak(1);
+
+                // Student Info
+                $section->addText("Student: {$nameSafe} (ID: {$ID})", 'headerStyle');
+                $section->addTextBreak(1);
+
+                // Create table for lessons
+                $lessonTable = $section->addTable('studentTable');
+
+                // Add header row
+                $lessonTable->addRow(400);
+                $lessonTable->addCell(2000, $headerCellStyle)->addText('Lesson #', 'boldText', array('alignment' => \PhpOffice\PhpWord\SimpleType\Jc::CENTER));
+                $lessonTable->addCell(2000, $headerCellStyle)->addText('Quiz Score', 'boldText', array('alignment' => \PhpOffice\PhpWord\SimpleType\Jc::CENTER));
+                $lessonTable->addCell(2500, $headerCellStyle)->addText('Attendance', 'boldText', array('alignment' => \PhpOffice\PhpWord\SimpleType\Jc::CENTER));
+                $lessonTable->addCell(2500, $headerCellStyle)->addText('Homework', 'boldText', array('alignment' => \PhpOffice\PhpWord\SimpleType\Jc::CENTER));
 
                 // Variables for calculating totals
                 $exams = [];
                 $totalScore = 0.0;
                 $totalItems = 0;
-                $maxPossibleScore = 0.0; // Tracks the actual maximum points (10 per quiz, 100 per exam)
+                $maxPossibleScore = 0.0;
 
+                // Lessons Data & Calculation
                 // Lessons Data & Calculation
                 foreach ($results as $lesson) {
                     $quizResult = (float)($lesson['student_results'] ?? 0.0);
+                    $maxQuizResult = (float)($lesson['max_quiz_result'] ?? 10.0); // Get from database
                     $attend = (int)($lesson['student_attends'] ?? 0);
                     $homework = (int)($lesson['student_homeworks'] ?? 0);
 
                     $attendMark = $attend === 1 ? "Present" : "Absent (-10 points)";
                     $homeworkMark = $homework === 1 ? "Done" : "Missed (-10 points)";
 
-                    $sheet->setCellValue('A' . $rowNum, $lesson['lesson_num'] ?? '-');
-                    $sheet->setCellValue('B' . $rowNum, $quizResult);
-                    $sheet->setCellValue('C' . $rowNum, $attendMark);
-                    $sheet->setCellValue('D' . $rowNum, $homeworkMark);
-                    $rowNum++;
+                    // Add data row
+                    $lessonTable->addRow();
+                    $lessonTable->addCell(2000, $cellStyle)->addText($lesson['lesson_num'] ?? '-', 'normalText', array('alignment' => \PhpOffice\PhpWord\SimpleType\Jc::CENTER));
+                    $lessonTable->addCell(2000, $cellStyle)->addText($quizResult . " / " . $maxQuizResult, 'normalText', array('alignment' => \PhpOffice\PhpWord\SimpleType\Jc::CENTER));
+                    $lessonTable->addCell(2500, $cellStyle)->addText($attendMark, 'normalText', array('alignment' => \PhpOffice\PhpWord\SimpleType\Jc::CENTER));
+                    $lessonTable->addCell(2500, $cellStyle)->addText($homeworkMark, 'normalText', array('alignment' => \PhpOffice\PhpWord\SimpleType\Jc::CENTER));
 
-                    // Calculation Logic (Quizzes out of 10)
+                    // Calculation Logic - USE DATABASE VALUES
                     if (is_numeric($lesson['student_results'])) {
-                        // 1. Add raw quiz score to total.
+                        // 1. Add raw quiz score to total
                         $totalScore += $quizResult;
 
-                        // 2. Max Possible Score increases by 10 (the quiz maximum).
-                        $maxPossibleScore += 10;
+                        // 2. Add the ACTUAL max quiz result from database
+                        $maxPossibleScore += $maxQuizResult;
 
                         $totalItems++;
 
@@ -508,68 +547,79 @@ try {
                         $examName = "Lesson " . ($lesson['lesson_num'] ?? '-');
                         $exams[] = [
                             'exam_name' => $examName,
-                            'score' => (float)($lesson['student_exams'] ?? 0.0)
+                            'score' => (float)($lesson['student_exams'] ?? 0.0),
+                            'max_score' => (float)($lesson['max_exam_result'] ?? 100.0) // Get from database
                         ];
                     }
                 }
-                $rowNum++;
+
+                $section->addTextBreak(1);
 
                 // Exams Data & Calculation
                 if (!empty($exams)) {
-                    $sheet->setCellValue('A' . $rowNum, "Exams Scores:");
-                    $rowNum++;
+                    $section->addText("Exams Scores:", 'subHeaderStyle');
+                    $section->addTextBreak(1);
 
-                    $sheet->setCellValue('A' . $rowNum, "Exam")->getStyle('A' . $rowNum)->getFont()->setBold(true);
-                    $sheet->setCellValue('B' . $rowNum, "Score")->getStyle('B' . $rowNum)->getFont()->setBold(true);
-                    $rowNum++;
+                    // Create exam table
+                    $examTable = $section->addTable('studentTable');
+
+                    // Header
+                    $examTable->addRow(400);
+                    $examTable->addCell(4500, $headerCellStyle)->addText('Exam', 'boldText', array('alignment' => \PhpOffice\PhpWord\SimpleType\Jc::CENTER));
+                    $examTable->addCell(4500, $headerCellStyle)->addText('Score', 'boldText', array('alignment' => \PhpOffice\PhpWord\SimpleType\Jc::CENTER));
 
                     foreach ($exams as $exam) {
-                        $sheet->setCellValue('A' . $rowNum, $exam['exam_name']);
-                        $sheet->setCellValue('B' . $rowNum, $exam['score']);
+                        $examTable->addRow();
+                        $examTable->addCell(4500, $cellStyle)->addText($exam['exam_name'], 'normalText', array('alignment' => \PhpOffice\PhpWord\SimpleType\Jc::CENTER));
+                        $examTable->addCell(4500, $cellStyle)->addText($exam['score'] . " / " . $exam['max_score'], 'normalText', array('alignment' => \PhpOffice\PhpWord\SimpleType\Jc::CENTER));
 
+                        // Use ACTUAL max exam result from database
                         $totalScore += (float)$exam['score'];
                         $totalItems++;
-                        $maxPossibleScore += 100; // Exams are assumed out of 100
-                        $rowNum++;
+                        $maxPossibleScore += (float)$exam['max_score']; // From database, not hardcoded 100
                     }
-                    $rowNum++;
+                    $section->addTextBreak(1);
                 }
 
                 // --- Final Summary ---
                 $percent = $maxPossibleScore > 0 ? ($totalScore / $maxPossibleScore) * 100 : 0;
 
-                $sheet->setCellValue('A' . $rowNum, "Total Score/Items:")->getStyle('A' . $rowNum)->getFont()->setBold(true);
-                $sheet->setCellValue('B' . $rowNum, round($totalScore, 1) . " / " . $maxPossibleScore . " points");
-                $rowNum++;
+                $section->addText("Summary", 'subHeaderStyle');
+                $section->addTextBreak(1);
 
-                $sheet->setCellValue('A' . $rowNum, "Overall Percent:")->getStyle('A' . $rowNum)->getFont()->setBold(true)->setSize(12);
-                $sheet->setCellValue('B' . $rowNum, round($percent, 2) . "%")->getStyle('B' . $rowNum)->getFont()->setBold(true)->setSize(12);
+                $textRun = $section->addTextRun();
+                $textRun->addText("Total Score/Items: ", 'boldText');
+                $textRun->addText(round($totalScore, 1) . " / " . $maxPossibleScore . " points", 'normalText');
 
-                $rowNum += 3; // Space before the next student report
+                $section->addTextBreak(1);
+
+                $textRun2 = $section->addTextRun();
+                $textRun2->addText("Overall Percent: ", 'summaryStyle');
+                $textRun2->addText(round($percent, 2) . "%", 'summaryStyle');
+
+                // Page break before next student (except for the last one)
+                if ($ID !== end($IDs)) {
+                    $section->addPageBreak();
+                }
             }
             // --- End of Loop ---
 
             // Check if any data was added
-            if ($rowNum <= 2) {
+            if (!$hasData) {
                 ob_end_clean();
-                header("Location: system.php?report_error=no_data_excel");
+                header("Location: system.php?report_error=no_data_word");
                 exit;
             }
 
-            // Auto-size columns
-            foreach (range('A', 'D') as $col) {
-                $sheet->getColumnDimension($col)->setAutoSize(true);
-            }
-
-            // --- 3. Save the file locally to D:/reports/ ---
+            // --- 3. Save the file locally to D:\reports\ ---
             try {
                 // Create the directory if it doesn't exist
                 if (!is_dir($saveDir)) {
                     mkdir($saveDir, 0777, true);
                 }
 
-                $writer = \PhpOffice\PhpSpreadsheet\IOFactory::createWriter($spreadsheet, 'Xlsx');
-                $writer->save($savePath);
+                $objWriter = \PhpOffice\PhpWord\IOFactory::createWriter($phpWord, 'Word2007');
+                $objWriter->save($savePath);
 
                 // Clear output buffer and redirect the user
                 ob_end_clean();
